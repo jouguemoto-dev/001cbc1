@@ -1,0 +1,107 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "Account": {
+      "title": "Account",
+      "description": "Bank account or digital wallet",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "balance": { "type": "number" },
+        "color": { "type": "string" },
+        "icon": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["id", "name", "userId"]
+    },
+    "CreditCard": {
+      "title": "CreditCard",
+      "description": "Credit card definition",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "limit": { "type": "number" },
+        "closingDay": { "type": "number" },
+        "dueDay": { "type": "number" },
+        "color": { "type": "string" },
+        "icon": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["id", "name", "userId"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Transaction category",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "color": { "type": "string" },
+        "icon": { "type": "string" },
+        "type": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["id", "name", "userId"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial income or expense transaction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "accountId": { "type": "string" },
+        "cardId": { "type": "string" },
+        "date": { "type": "string" },
+        "isPaid": { "type": "boolean" },
+        "isRecurring": { "type": "boolean" },
+        "recurrenceInterval": { "type": "string" },
+        "installmentTotal": { "type": "number" },
+        "installmentIndex": { "type": "number" },
+        "installmentGroupId": { "type": "string" },
+        "invoiceMonth": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["id", "description", "amount", "type", "date", "userId"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile document"
+    },
+    "/users/{userId}/accounts/{accountId}": {
+      "schema": "Account",
+      "description": "User bank accounts"
+    },
+    "/users/{userId}/creditCards/{cardId}": {
+      "schema": "CreditCard",
+      "description": "User credit cards"
+    },
+    "/users/{userId}/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "User transaction categories"
+    },
+    "/users/{userId}/transactions/{txId}": {
+      "schema": "Transaction",
+      "description": "User transactions records"
+    }
+  }
+}

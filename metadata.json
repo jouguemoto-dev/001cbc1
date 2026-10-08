@@ -1,0 +1,6 @@
+{
+  "name": "FinanZen PWA - Controle Financeiro Pessoal",
+  "description": "Aplicativo completo de controle financeiro pessoal PWA com dashboard, faturas de cartão de crédito, projeção de parcelas, lançamentos em lote e assistente inteligente por chat.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
