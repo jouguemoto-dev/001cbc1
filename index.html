@@ -489,6 +489,13 @@
             <polyline points="16 17 21 12 16 7" />
             <line x1="21" x2="9" y1="12" y2="12" />
           </>
+        ),
+        alertTriangle: (
+          <>
+            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+            <line x1="12" x2="12" y1="9" y2="13" />
+            <line x1="12" x2="12.01" y1="17" y2="17" />
+          </>
         )
       };
 
@@ -906,6 +913,35 @@
       const [showAdjustInvoiceModal, setShowAdjustInvoiceModal] = useState(false);
       const [showBatchCategoryModal, setShowBatchCategoryModal] = useState(false);
 
+      // Account & Category CRUD Modals State
+      const [showAccountModal, setShowAccountModal] = useState(false);
+      const [editingAccount, setEditingAccount] = useState(null);
+      const [showCategoryModal, setShowCategoryModal] = useState(false);
+      const [editingCategory, setEditingCategory] = useState(null);
+
+      // Confirmation Dialog State ("Perguntar antes de excluir")
+      const [deleteConfirm, setDeleteConfirm] = useState({
+        isOpen: false,
+        title: '',
+        message: '',
+        details: '',
+        onConfirm: null
+      });
+
+      const requestDeleteConfirm = ({ title, message, details, onConfirm }) => {
+        setDeleteConfirm({
+          isOpen: true,
+          title: title || 'Confirmar Exclusão',
+          message: message || 'Tem certeza que deseja excluir este item?',
+          details: details || '',
+          onConfirm
+        });
+      };
+
+      const closeDeleteConfirm = () => {
+        setDeleteConfirm(prev => ({ ...prev, isOpen: false }));
+      };
+
       // Filters State for Transactions and Reports
       const [filterPeriod, setFilterPeriod] = useState('month'); // 'month', 'last30', 'last90', 'year', 'all', 'custom'
       const [filterCustomStart, setFilterCustomStart] = useState('');
@@ -919,6 +955,10 @@
 
       // PDF Report Modal State
       const [showPDFModal, setShowPDFModal] = useState(false);
+
+      // Firebase Database (Firestore) & Auth State
+      // Helper to isolate localStorage per individual user account
+      const getUserStorageKey = (uid, key) => uid ? `finanzen_${uid}_${key}_v2` : `finanzen_guest_${key}_v2`;
 
       // Firebase Database (Firestore) & Auth State
       const [currentUser, setCurrentUser] = useState(null);
@@ -940,24 +980,28 @@
         setTimeout(() => setToastMessage(null), 3500);
       };
 
-      // Persist to localStorage
+      // Auto-save state to user-scoped localStorage
       useEffect(() => {
-        localStorage.setItem('finanzen_tx_v1', JSON.stringify(transactions));
-      }, [transactions]);
+        if (!currentUser) return;
+        localStorage.setItem(getUserStorageKey(currentUser.uid, 'tx'), JSON.stringify(transactions));
+      }, [transactions, currentUser]);
 
       useEffect(() => {
-        localStorage.setItem('finanzen_acc_v1', JSON.stringify(accounts));
-      }, [accounts]);
+        if (!currentUser) return;
+        localStorage.setItem(getUserStorageKey(currentUser.uid, 'acc'), JSON.stringify(accounts));
+      }, [accounts, currentUser]);
 
       useEffect(() => {
-        localStorage.setItem('finanzen_cards_v1', JSON.stringify(cards));
-      }, [cards]);
+        if (!currentUser) return;
+        localStorage.setItem(getUserStorageKey(currentUser.uid, 'cards'), JSON.stringify(cards));
+      }, [cards, currentUser]);
 
       useEffect(() => {
-        localStorage.setItem('finanzen_cat_v1', JSON.stringify(categories));
-      }, [categories]);
+        if (!currentUser) return;
+        localStorage.setItem(getUserStorageKey(currentUser.uid, 'cat'), JSON.stringify(categories));
+      }, [categories, currentUser]);
 
-      // Firebase Auth Lifecycle & Auto-Session
+      // Firebase Auth Lifecycle & Auto Individual User Session
       useEffect(() => {
         if (!firebaseAuth) {
           setSyncStatus('offline');
@@ -970,7 +1014,7 @@
             setDbConnected(true);
             setSyncStatus('synced');
           } else {
-            // Automatically sign in anonymously so every user gets immediate isolated cloud database persistence
+            // Automatically establish an individual anonymous account with its own private cloud storage
             try {
               const cred = await firebaseAuth.signInAnonymously();
               setCurrentUser(cred.user);
@@ -986,7 +1030,7 @@
         return () => unsubscribe();
       }, []);
 
-      // Helper to sync single item to Firestore
+      // Helper to sync single item to Firestore for the individual account
       const syncEntityToCloud = async (collectionName, docId, data, isDelete = false) => {
         if (!firestoreDb || !currentUser) return;
         try {
@@ -996,18 +1040,28 @@
           if (isDelete) {
             await itemRef.delete();
           } else {
-            await itemRef.set(sanitizeForFirestore(data), { merge: true });
+            const cleanData = sanitizeForFirestore({
+              ...data,
+              id: docId,
+              userId: currentUser.uid,
+              updatedAt: new Date().toISOString()
+            });
+            await itemRef.set(cleanData, { merge: true });
           }
-          await userRef.set({ uid: currentUser.uid, email: currentUser.email || null, lastSync: new Date().toISOString() }, { merge: true });
+          await userRef.set({
+            uid: currentUser.uid,
+            email: currentUser.email || null,
+            lastSync: new Date().toISOString()
+          }, { merge: true });
           setSyncStatus('synced');
           setLastSyncTime(new Date());
         } catch (err) {
           console.warn(`Erro ao sincronizar ${collectionName} com Firebase:`, err);
-          setSyncStatus('offline');
+          setSyncStatus('error');
         }
       };
 
-      // Full Force Cloud Sync
+      // Full Force Cloud Sync for Individual Account
       const handleForceSyncAll = async () => {
         if (!firestoreDb || !currentUser) {
           triggerToast('Banco de Dados não conectado.');
@@ -1020,27 +1074,32 @@
 
           // Sync accounts
           accounts.forEach(acc => {
-            batch.set(userRef.collection('accounts').doc(acc.id), sanitizeForFirestore(acc), { merge: true });
+            batch.set(userRef.collection('accounts').doc(acc.id), sanitizeForFirestore({ ...acc, userId: currentUser.uid }), { merge: true });
           });
           // Sync cards
           cards.forEach(card => {
-            batch.set(userRef.collection('creditCards').doc(card.id), sanitizeForFirestore(card), { merge: true });
+            batch.set(userRef.collection('creditCards').doc(card.id), sanitizeForFirestore({ ...card, userId: currentUser.uid }), { merge: true });
           });
           // Sync categories
           categories.forEach(cat => {
-            batch.set(userRef.collection('categories').doc(cat.id), sanitizeForFirestore(cat), { merge: true });
+            batch.set(userRef.collection('categories').doc(cat.id), sanitizeForFirestore({ ...cat, userId: currentUser.uid }), { merge: true });
           });
           // Sync transactions
           transactions.forEach(tx => {
-            batch.set(userRef.collection('transactions').doc(tx.id), sanitizeForFirestore(tx), { merge: true });
+            batch.set(userRef.collection('transactions').doc(tx.id), sanitizeForFirestore({ ...tx, userId: currentUser.uid }), { merge: true });
           });
 
-          batch.set(userRef, { uid: currentUser.uid, email: currentUser.email || null, lastSync: new Date().toISOString() }, { merge: true });
+          batch.set(userRef, {
+            uid: currentUser.uid,
+            email: currentUser.email || null,
+            lastSync: new Date().toISOString()
+          }, { merge: true });
+
           await batch.commit();
 
           setSyncStatus('synced');
           setLastSyncTime(new Date());
-          triggerToast('☁️ Banco de dados sincronizado com sucesso!');
+          triggerToast('🟢 Sincronização em tempo real concluída com sucesso!');
         } catch (err) {
           console.error("Erro na sincronização:", err);
           setSyncStatus('error');
@@ -1048,7 +1107,7 @@
         }
       };
 
-      // Realtime Cloud Synchronization
+      // Realtime Cloud Synchronization (Automatic Listeners) for Current Individual Account
       useEffect(() => {
         if (!firestoreDb || !currentUser) return;
 
@@ -1058,83 +1117,218 @@
         let unsubCards = null;
         let unsubCat = null;
 
+        // Try restoring user's cache immediately to prevent visual flash
+        try {
+          const cachedTx = localStorage.getItem(getUserStorageKey(currentUser.uid, 'tx'));
+          if (cachedTx) setTransactions(JSON.parse(cachedTx));
+          const cachedAcc = localStorage.getItem(getUserStorageKey(currentUser.uid, 'acc'));
+          if (cachedAcc) setAccounts(JSON.parse(cachedAcc));
+          const cachedCards = localStorage.getItem(getUserStorageKey(currentUser.uid, 'cards'));
+          if (cachedCards) setCards(JSON.parse(cachedCards));
+          const cachedCat = localStorage.getItem(getUserStorageKey(currentUser.uid, 'cat'));
+          if (cachedCat) setCategories(JSON.parse(cachedCat));
+        } catch (e) {
+          console.warn('Erro ao restaurar cache local do usuário:', e);
+        }
+
         const bootstrapCloudData = async () => {
           try {
             setSyncStatus('syncing');
             const userRef = firestoreDb.collection('users').doc(currentUser.uid);
 
-            // Check if user already has transactions in cloud
-            const testSnap = await userRef.collection('transactions').limit(1).get();
-            if (testSnap.empty) {
-              // Cloud collection is empty for this user: initial upload of local data
+            // Check if this individual account already has data in cloud
+            const testAccountsSnap = await userRef.collection('accounts').limit(1).get();
+            if (testAccountsSnap.empty) {
+              // Brand-new individual account: Seed isolated initial accounts, cards, categories and starter transactions
               const batch = firestoreDb.batch();
-              accounts.forEach(acc => {
-                batch.set(userRef.collection('accounts').doc(acc.id), sanitizeForFirestore(acc), { merge: true });
+              const seedUid = currentUser.uid.slice(0, 6);
+
+              const seededAccounts = [
+                { id: `acc-1-${seedUid}`, name: 'Nubank (Conta Principal)', type: 'checking', balance: 3450.00, color: '#820ad1', userId: currentUser.uid },
+                { id: `acc-2-${seedUid}`, name: 'Banco Inter', type: 'checking', balance: 1280.50, color: '#ff7a00', userId: currentUser.uid },
+                { id: `acc-3-${seedUid}`, name: 'Carteira (Dinheiro Vivo)', type: 'wallet', balance: 220.00, color: '#10b981', userId: currentUser.uid },
+              ];
+
+              const seededCards = [
+                {
+                  id: `card-1-${seedUid}`,
+                  name: 'Nubank Roxinho',
+                  brand: 'Mastercard',
+                  limit: 6500.00,
+                  closingDay: 25,
+                  dueDay: 5,
+                  color: '#820ad1',
+                  linkedAccountId: `acc-1-${seedUid}`,
+                  adjustments: {},
+                  userId: currentUser.uid
+                },
+                {
+                  id: `card-2-${seedUid}`,
+                  name: 'Inter Black',
+                  brand: 'Mastercard',
+                  limit: 12000.00,
+                  closingDay: 18,
+                  dueDay: 28,
+                  color: '#ff7a00',
+                  linkedAccountId: `acc-2-${seedUid}`,
+                  adjustments: {},
+                  userId: currentUser.uid
+                }
+              ];
+
+              const seededCategories = initialCategories.map(c => ({
+                ...c,
+                id: `${c.id}-${seedUid}`,
+                userId: currentUser.uid
+              }));
+
+              const curYM = getCurrentYearMonth();
+              const seededTransactions = [
+                {
+                  id: `tx-1-${seedUid}`,
+                  description: 'Salário Mensal',
+                  amount: 5800.00,
+                  date: `${curYM}-05`,
+                  type: 'income',
+                  categoryId: `cat-7-${seedUid}`,
+                  paymentMethod: 'account',
+                  accountId: `acc-1-${seedUid}`,
+                  status: 'paid',
+                  isRecurring: true,
+                  recurrenceFrequency: 'monthly',
+                  isInstallment: false,
+                  userId: currentUser.uid
+                },
+                {
+                  id: `tx-2-${seedUid}`,
+                  description: 'Aluguel do Apartamento',
+                  amount: 1650.00,
+                  date: `${curYM}-08`,
+                  type: 'expense',
+                  categoryId: `cat-2-${seedUid}`,
+                  paymentMethod: 'account',
+                  accountId: `acc-1-${seedUid}`,
+                  status: 'paid',
+                  isRecurring: true,
+                  recurrenceFrequency: 'monthly',
+                  isInstallment: false,
+                  userId: currentUser.uid
+                },
+                {
+                  id: `tx-3-${seedUid}`,
+                  description: 'Supermercado Mensal',
+                  amount: 485.60,
+                  date: `${curYM}-10`,
+                  type: 'expense',
+                  categoryId: `cat-1-${seedUid}`,
+                  paymentMethod: 'credit_card',
+                  creditCardId: `card-1-${seedUid}`,
+                  status: 'pending',
+                  isRecurring: false,
+                  isInstallment: false,
+                  invoiceMonth: curYM,
+                  userId: currentUser.uid
+                }
+              ];
+
+              seededAccounts.forEach(acc => {
+                batch.set(userRef.collection('accounts').doc(acc.id), sanitizeForFirestore(acc));
               });
-              cards.forEach(card => {
-                batch.set(userRef.collection('creditCards').doc(card.id), sanitizeForFirestore(card), { merge: true });
+              seededCards.forEach(card => {
+                batch.set(userRef.collection('creditCards').doc(card.id), sanitizeForFirestore(card));
               });
-              categories.forEach(cat => {
-                batch.set(userRef.collection('categories').doc(cat.id), sanitizeForFirestore(cat), { merge: true });
+              seededCategories.forEach(cat => {
+                batch.set(userRef.collection('categories').doc(cat.id), sanitizeForFirestore(cat));
               });
-              transactions.forEach(tx => {
-                batch.set(userRef.collection('transactions').doc(tx.id), sanitizeForFirestore(tx), { merge: true });
+              seededTransactions.forEach(tx => {
+                batch.set(userRef.collection('transactions').doc(tx.id), sanitizeForFirestore(tx));
               });
-              batch.set(userRef, { uid: currentUser.uid, email: currentUser.email || null, lastSync: new Date().toISOString() }, { merge: true });
+
+              batch.set(userRef, {
+                uid: currentUser.uid,
+                email: currentUser.email || null,
+                createdAt: new Date().toISOString(),
+                lastSync: new Date().toISOString()
+              }, { merge: true });
+
               await batch.commit();
+
+              if (isMounted) {
+                setAccounts(seededAccounts);
+                setCards(seededCards);
+                setCategories(seededCategories);
+                setTransactions(seededTransactions);
+              }
             }
 
-            // Real-time listener for Transactions
+            // 1. Real-time automatic listener for Transactions
             unsubTx = userRef.collection('transactions').onSnapshot((snapshot) => {
               if (!isMounted) return;
-              if (!snapshot.empty) {
-                const cloudTxs = [];
-                snapshot.forEach(doc => cloudTxs.push(doc.data()));
-                cloudTxs.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-                setTransactions(cloudTxs);
-                localStorage.setItem('finanzen_tx_v1', JSON.stringify(cloudTxs));
-              }
+              const cloudTxs = [];
+              snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data) cloudTxs.push(data);
+              });
+              cloudTxs.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+              setTransactions(cloudTxs);
+              localStorage.setItem(getUserStorageKey(currentUser.uid, 'tx'), JSON.stringify(cloudTxs));
               setSyncStatus('synced');
               setLastSyncTime(new Date());
             }, (err) => {
-              console.warn("Erro no listener de transações:", err);
+              console.warn("Erro no listener em tempo real de transações:", err);
+              if (isMounted) setSyncStatus('offline');
             });
 
-            // Real-time listener for Accounts
+            // 2. Real-time automatic listener for Accounts
             unsubAcc = userRef.collection('accounts').onSnapshot((snapshot) => {
               if (!isMounted) return;
-              if (!snapshot.empty) {
-                const list = [];
-                snapshot.forEach(doc => list.push(doc.data()));
+              const list = [];
+              snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data) list.push(data);
+              });
+              if (list.length > 0) {
                 setAccounts(list);
-                localStorage.setItem('finanzen_acc_v1', JSON.stringify(list));
+                localStorage.setItem(getUserStorageKey(currentUser.uid, 'acc'), JSON.stringify(list));
               }
+            }, (err) => {
+              console.warn("Erro no listener em tempo real de contas:", err);
             });
 
-            // Real-time listener for Cards
+            // 3. Real-time automatic listener for Cards
             unsubCards = userRef.collection('creditCards').onSnapshot((snapshot) => {
               if (!isMounted) return;
-              if (!snapshot.empty) {
-                const list = [];
-                snapshot.forEach(doc => list.push(doc.data()));
+              const list = [];
+              snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data) list.push(data);
+              });
+              if (list.length > 0) {
                 setCards(list);
-                localStorage.setItem('finanzen_cards_v1', JSON.stringify(list));
+                localStorage.setItem(getUserStorageKey(currentUser.uid, 'cards'), JSON.stringify(list));
               }
+            }, (err) => {
+              console.warn("Erro no listener em tempo real de cartões:", err);
             });
 
-            // Real-time listener for Categories
+            // 4. Real-time automatic listener for Categories
             unsubCat = userRef.collection('categories').onSnapshot((snapshot) => {
               if (!isMounted) return;
-              if (!snapshot.empty) {
-                const list = [];
-                snapshot.forEach(doc => list.push(doc.data()));
+              const list = [];
+              snapshot.forEach(doc => {
+                const data = doc.data();
+                if (data) list.push(data);
+              });
+              if (list.length > 0) {
                 setCategories(list);
-                localStorage.setItem('finanzen_cat_v1', JSON.stringify(list));
+                localStorage.setItem(getUserStorageKey(currentUser.uid, 'cat'), JSON.stringify(list));
               }
+            }, (err) => {
+              console.warn("Erro no listener em tempo real de categorias:", err);
             });
 
           } catch (err) {
-            console.warn("Bootstrap cloud data error:", err);
+            console.warn("Erro no bootstrap de dados da conta individual:", err);
             if (isMounted) setSyncStatus('offline');
           }
         };
@@ -1158,12 +1352,16 @@
         setCloudAuthError(null);
         try {
           await firebaseAuth.signInWithEmailAndPassword(cloudAuthEmail, cloudAuthPass);
-          triggerToast('Conectado à sua conta na nuvem!');
+          triggerToast('🟢 Conectado à sua conta individual! Sincronização em tempo real ativada.');
           setCloudAuthEmail('');
           setCloudAuthPass('');
           setShowCloudModal(false);
         } catch (err) {
-          setCloudAuthError(err.message || 'Erro ao fazer login.');
+          if (err.code === 'auth/wrong-password' || err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+            setCloudAuthError('E-mail ou senha incorretos.');
+          } else {
+            setCloudAuthError(err.message || 'Erro ao entrar na conta.');
+          }
         } finally {
           setCloudAuthLoading(false);
         }
@@ -1176,18 +1374,23 @@
         setCloudAuthError(null);
         try {
           if (currentUser && currentUser.isAnonymous) {
-            // Link anonymous account
+            // Link anonymous account so user retains all current data
             const credential = firebase.auth.EmailAuthProvider.credential(cloudAuthEmail, cloudAuthPass);
             await currentUser.linkWithCredential(credential);
+            triggerToast('🎉 Conta individual criada e vinculada! Seus dados foram preservados e estão sincronizados.');
           } else {
             await firebaseAuth.createUserWithEmailAndPassword(cloudAuthEmail, cloudAuthPass);
+            triggerToast('🎉 Nova conta individual criada! Sincronização em tempo real ativada.');
           }
-          triggerToast('Conta criada e sincronizada com sucesso!');
           setCloudAuthEmail('');
           setCloudAuthPass('');
           setShowCloudModal(false);
         } catch (err) {
-          setCloudAuthError(err.message || 'Erro ao criar conta.');
+          if (err.code === 'auth/email-already-in-use') {
+            setCloudAuthError('Este e-mail já está em uso. Alterne para "Já tenho conta (Entrar)".');
+          } else {
+            setCloudAuthError(err.message || 'Erro ao criar conta individual.');
+          }
         } finally {
           setCloudAuthLoading(false);
         }
@@ -1197,7 +1400,7 @@
         if (!firebaseAuth) return;
         try {
           await firebaseAuth.signOut();
-          triggerToast('Desconectado. Gerando nova sessão local...');
+          triggerToast('Desconectado da conta individual. Nova sessão privada iniciada.');
           setShowCloudModal(false);
         } catch (err) {
           triggerToast('Erro ao desconectar: ' + err.message);
@@ -1604,11 +1807,126 @@
         setEditingTx(null);
       };
 
-      const handleDeleteTransaction = (id) => {
-        setTransactions(prev => prev.filter(t => t.id !== id));
-        setSelectedTxIds(prev => prev.filter(item => item !== id));
-        syncEntityToCloud('transactions', id, null, true);
-        triggerToast('Lançamento excluído');
+      // --- Deletion Handlers with Confirmation Modal ("Perguntar antes de excluir") ---
+      const promptDeleteTransaction = (tx) => {
+        requestDeleteConfirm({
+          title: 'Excluir Lançamento',
+          message: `Tem certeza que deseja excluir o lançamento "${tx.description}" (${formatBRL(tx.amount)})?`,
+          details: 'O registro será removido permanentemente e a alteração será sincronizada na nuvem.',
+          onConfirm: () => {
+            setTransactions(prev => prev.filter(t => t.id !== tx.id));
+            setSelectedTxIds(prev => prev.filter(item => item !== tx.id));
+            syncEntityToCloud('transactions', tx.id, null, true);
+            triggerToast('Lançamento excluído com sucesso.');
+            closeDeleteConfirm();
+          }
+        });
+      };
+
+      const promptBatchDelete = () => {
+        if (selectedTxIds.length === 0) return;
+        requestDeleteConfirm({
+          title: 'Excluir Lançamentos em Lote',
+          message: `Tem certeza que deseja excluir os ${selectedTxIds.length} lançamentos selecionados?`,
+          details: 'Todos os registros marcados serão removidos permanentemente.',
+          onConfirm: () => {
+            selectedTxIds.forEach(id => syncEntityToCloud('transactions', id, null, true));
+            setTransactions(prev => prev.filter(t => !selectedTxIds.includes(t.id)));
+            triggerToast(`${selectedTxIds.length} lançamentos excluídos.`);
+            setSelectedTxIds([]);
+            closeDeleteConfirm();
+          }
+        });
+      };
+
+      const promptDeleteCard = (card) => {
+        const linkedCount = transactions.filter(t => t.creditCardId === card.id).length;
+        requestDeleteConfirm({
+          title: 'Excluir Cartão de Crédito',
+          message: `Tem certeza que deseja excluir o cartão "${card.name}"?`,
+          details: linkedCount > 0
+            ? `Atenção: Existem ${linkedCount} lançamento(s) vinculados a este cartão.`
+            : 'As configurações e o limite deste cartão serão removidos.',
+          onConfirm: () => {
+            setCards(prev => prev.filter(c => c.id !== card.id));
+            syncEntityToCloud('creditCards', card.id, null, true);
+            triggerToast(`Cartão "${card.name}" excluído.`);
+            closeDeleteConfirm();
+          }
+        });
+      };
+
+      const promptDeleteAccount = (acc) => {
+        const linkedCount = transactions.filter(t => t.accountId === acc.id).length;
+        requestDeleteConfirm({
+          title: 'Excluir Conta Bancária',
+          message: `Tem certeza que deseja excluir a conta "${acc.name}"?`,
+          details: `Saldo atual: ${formatBRL(acc.balance)}.` + (linkedCount > 0 ? ` Atenção: Existem ${linkedCount} lançamento(s) vinculados a esta conta.` : ''),
+          onConfirm: () => {
+            setAccounts(prev => prev.filter(a => a.id !== acc.id));
+            syncEntityToCloud('accounts', acc.id, null, true);
+            triggerToast(`Conta "${acc.name}" excluída.`);
+            closeDeleteConfirm();
+          }
+        });
+      };
+
+      const promptDeleteCategory = (cat) => {
+        const linkedCount = transactions.filter(t => t.categoryId === cat.id).length;
+        requestDeleteConfirm({
+          title: 'Excluir Categoria',
+          message: `Tem certeza que deseja excluir a categoria "${cat.name}"?`,
+          details: linkedCount > 0
+            ? `Atenção: Existem ${linkedCount} lançamento(s) categorizados como "${cat.name}".`
+            : 'A categoria será removida permanentemente.',
+          onConfirm: () => {
+            setCategories(prev => prev.filter(c => c.id !== cat.id));
+            syncEntityToCloud('categories', cat.id, null, true);
+            triggerToast(`Categoria "${cat.name}" excluída.`);
+            closeDeleteConfirm();
+          }
+        });
+      };
+
+      // --- Account CRUD Handlers ---
+      const handleSaveAccount = (accData) => {
+        if (editingAccount) {
+          const upAcc = { ...editingAccount, ...accData, balance: parseFloat(accData.balance || 0) };
+          setAccounts(prev => prev.map(a => a.id === editingAccount.id ? upAcc : a));
+          syncEntityToCloud('accounts', editingAccount.id, upAcc);
+          triggerToast('Conta atualizada com sucesso!');
+        } else {
+          const newAcc = {
+            id: 'acc-' + Date.now(),
+            ...accData,
+            balance: parseFloat(accData.balance || 0)
+          };
+          setAccounts(prev => [...prev, newAcc]);
+          syncEntityToCloud('accounts', newAcc.id, newAcc);
+          triggerToast('Nova conta adicionada!');
+        }
+        setShowAccountModal(false);
+        setEditingAccount(null);
+      };
+
+      // --- Category CRUD Handlers ---
+      const handleSaveCategory = (catData) => {
+        if (editingCategory) {
+          const upCat = { ...editingCategory, ...catData };
+          setCategories(prev => prev.map(c => c.id === editingCategory.id ? upCat : c));
+          syncEntityToCloud('categories', editingCategory.id, upCat);
+          triggerToast('Categoria atualizada com sucesso!');
+        } else {
+          const newCat = {
+            id: 'cat-' + Date.now(),
+            ...catData
+          };
+          setCategories(prev => [...prev, newCat]);
+          syncEntityToCloud('categories', newCat.id, newCat);
+          triggerToast('Nova categoria adicionada!');
+        }
+        setShowCategoryModal(false);
+        setEditingCategory(null);
       };
 
       const handleToggleTxStatus = (tx) => {
@@ -1643,15 +1961,6 @@
         }));
         triggerToast(`${selectedTxIds.length} lançamentos marcados como ${newStatus === 'paid' ? 'Pagos' : 'Pendentes'}`);
         setSelectedTxIds([]);
-      };
-
-      const handleBatchDelete = () => {
-        if (window.confirm(`Tem certeza que deseja excluir os ${selectedTxIds.length} lançamentos selecionados?`)) {
-          selectedTxIds.forEach(id => syncEntityToCloud('transactions', id, null, true));
-          setTransactions(prev => prev.filter(t => !selectedTxIds.includes(t.id)));
-          triggerToast(`${selectedTxIds.length} lançamentos excluídos.`);
-          setSelectedTxIds([]);
-        }
       };
 
       const handleBatchChangeCategory = (newCatId) => {
@@ -2137,6 +2446,36 @@
               </button>
             </nav>
 
+            {/* User Individual Account & Real-time Sync Status Card */}
+            <div className="p-3 mx-3 mb-2 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold text-xs flex items-center justify-center flex-shrink-0 border border-emerald-500/25">
+                  {currentUser && currentUser.email ? currentUser.email.charAt(0).toUpperCase() : '👤'}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-slate-900 dark:text-white truncate leading-tight">
+                    {currentUser && currentUser.email ? currentUser.email : 'Conta Individual'}
+                  </div>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <span className="relative flex h-1.5 w-1.5 flex-shrink-0">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                    </span>
+                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold truncate">
+                      Tempo Real Ativo
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowCloudModal(true)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors flex-shrink-0"
+                title="Gerenciar Conta Individual & Sincronização"
+              >
+                <Icon name="settings" size={15} />
+              </button>
+            </div>
+
             {/* Sidebar Footer: Install PWA + Dark Mode */}
             <div className="p-4 border-t border-slate-100 dark:border-slate-800/80 space-y-2">
               {!isInstalled && (
@@ -2202,33 +2541,39 @@
 
               {/* Right Action Buttons */}
               <div className="flex items-center gap-2 sm:gap-3">
-                {/* Firebase Database Status & Modal Trigger */}
+                {/* Individual Account & Real-time Sync Indicator */}
                 <button
                   onClick={() => setShowCloudModal(true)}
-                  className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-xs font-semibold border transition-all ${
+                  className={`flex items-center gap-2 px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-xs font-semibold border transition-all ${
                     syncStatus === 'synced'
-                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/40'
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/40'
                       : syncStatus === 'syncing'
                       ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800/60 hover:bg-blue-100'
                       : 'bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/60 hover:bg-amber-100'
                   }`}
-                  title="Status do Banco de Dados Firestore"
+                  title="Conta Individual & Sincronização em Tempo Real"
                 >
-                  <span className="relative flex h-2 w-2">
-                    {syncStatus === 'synced' && (
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                    )}
-                    <span className={`relative inline-flex rounded-full h-2 w-2 ${
-                      syncStatus === 'synced' ? 'bg-emerald-500' : syncStatus === 'syncing' ? 'bg-blue-500' : 'bg-amber-500'
-                    }`}></span>
-                  </span>
-                  <Icon name="database" size={14} className={syncStatus === 'syncing' ? 'animate-spin' : ''} />
-                  <span className="hidden sm:inline">
-                    {syncStatus === 'synced' ? 'Banco Conectado' : syncStatus === 'syncing' ? 'Sincronizando...' : 'Modo Offline'}
-                  </span>
-                  <span className="sm:hidden">
-                    {syncStatus === 'synced' ? 'Nuvem' : syncStatus === 'syncing' ? 'Sinc...' : 'Off'}
-                  </span>
+                  <div className="w-5 h-5 rounded-lg bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center flex-shrink-0 shadow-sm">
+                    {currentUser && currentUser.email ? currentUser.email.charAt(0).toUpperCase() : '👤'}
+                  </div>
+                  <div className="flex flex-col items-start leading-tight text-left">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-bold text-slate-800 dark:text-slate-100 truncate max-w-[110px] sm:max-w-[170px]">
+                        {currentUser && currentUser.email ? currentUser.email : 'Conta Individual'}
+                      </span>
+                      <span className="relative flex h-2 w-2 flex-shrink-0">
+                        {syncStatus === 'synced' && (
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                        )}
+                        <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                          syncStatus === 'synced' ? 'bg-emerald-500' : syncStatus === 'syncing' ? 'bg-blue-500' : 'bg-amber-500'
+                        }`}></span>
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium hidden sm:inline">
+                      {syncStatus === 'synced' ? 'Tempo Real Ativo' : syncStatus === 'syncing' ? 'Sincronizando...' : 'Offline'}
+                    </span>
+                  </div>
                 </button>
 
                 {!isInstalled && (
@@ -2408,12 +2753,24 @@
                         <h2 className="text-base font-bold text-slate-900 dark:text-white">Cartões de Crédito</h2>
                         <p className="text-xs text-slate-400">Faturas e limites disponíveis</p>
                       </div>
-                      <button
-                        onClick={() => setActiveTab('cards')}
-                        className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
-                      >
-                        Gerenciar Cartões →
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setEditingCard(null);
+                            setShowCardModal(true);
+                          }}
+                          className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-100 flex items-center gap-1 transition-colors"
+                        >
+                          <Icon name="plus" size={13} />
+                          <span>Novo Cartão</span>
+                        </button>
+                        <button
+                          onClick={() => setActiveTab('cards')}
+                          className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
+                        >
+                          Ver Todos →
+                        </button>
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2426,44 +2783,154 @@
                         return (
                           <div
                             key={card.id}
-                            className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-emerald-500/50 transition-all cursor-pointer bg-slate-50/50 dark:bg-slate-800/40"
-                            onClick={() => {
-                              setSelectedCardForInvoice(card);
-                              setInvoiceViewingMonth(selectedMonth);
-                              setShowInvoiceModal(true);
-                            }}
+                            className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-emerald-500/50 transition-all bg-slate-50/50 dark:bg-slate-800/40 space-y-2.5"
                           >
-                            <div className="flex items-center justify-between mb-3">
-                              <div className="flex items-center gap-2.5">
+                            <div className="flex items-center justify-between">
+                              <div
+                                className="flex items-center gap-2.5 cursor-pointer"
+                                onClick={() => {
+                                  setSelectedCardForInvoice(card);
+                                  setInvoiceViewingMonth(selectedMonth);
+                                  setShowInvoiceModal(true);
+                                }}
+                              >
                                 <span className="w-3.5 h-3.5 rounded-full" style={{ backgroundColor: card.color }} />
                                 <span className="font-bold text-sm text-slate-900 dark:text-white">{card.name}</span>
                               </div>
-                              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
-                                invoice.isPaid ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                              }`}>
-                                {invoice.isPaid ? 'Fatura Paga' : `Fecha dia ${card.closingDay}`}
+                              <div className="flex items-center gap-1">
+                                <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full mr-1 ${
+                                  invoice.isPaid ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                                }`}>
+                                  {invoice.isPaid ? 'Fatura Paga' : `Fecha dia ${card.closingDay}`}
+                                </span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingCard(card);
+                                    setShowCardModal(true);
+                                  }}
+                                  className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                                  title="Editar Cartão"
+                                >
+                                  <Icon name="edit" size={14} />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    promptDeleteCard(card);
+                                  }}
+                                  className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                                  title="Excluir Cartão (Confirmação necessária)"
+                                >
+                                  <Icon name="trash" size={14} />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div
+                              className="cursor-pointer"
+                              onClick={() => {
+                                setSelectedCardForInvoice(card);
+                                setInvoiceViewingMonth(selectedMonth);
+                                setShowInvoiceModal(true);
+                              }}
+                            >
+                              <div className="flex items-baseline justify-between mb-1.5">
+                                <span className="text-xs text-slate-500">Fatura Atual:</span>
+                                <span className="text-base font-bold text-slate-900 dark:text-white">{formatBRL(usedLimit)}</span>
+                              </div>
+
+                              {/* Limit progress bar */}
+                              <div className="w-full bg-slate-200 dark:bg-slate-700 h-2 rounded-full overflow-hidden mb-2">
+                                <div
+                                  className="h-full rounded-full transition-all"
+                                  style={{
+                                    width: `${limitPercent}%`,
+                                    backgroundColor: limitPercent > 85 ? '#ef4444' : card.color
+                                  }}
+                                />
+                              </div>
+
+                              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                                <span>Disponível: {formatBRL(availableLimit)}</span>
+                                <span>Limite: {formatBRL(card.limit)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Bank Accounts & Wallets Quick Overview */}
+                  <div className="bg-white dark:bg-[#111827] p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 shadow-sm">
+                    <div className="flex items-center justify-between mb-4">
+                      <div>
+                        <h2 className="text-base font-bold text-slate-900 dark:text-white">Contas Bancárias & Carteiras</h2>
+                        <p className="text-xs text-slate-400">Saldo atual disponível por instituição</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setEditingAccount(null);
+                            setShowAccountModal(true);
+                          }}
+                          className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-400 hover:bg-emerald-100 flex items-center gap-1 transition-colors"
+                        >
+                          <Icon name="plus" size={13} />
+                          <span>Nova Conta</span>
+                        </button>
+                        <button
+                          onClick={() => setActiveTab('categories')}
+                          className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
+                        >
+                          Gerenciar Contas & Categorias →
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {accounts.map(acc => {
+                        const typeLabels = {
+                          checking: 'Corrente',
+                          savings: 'Poupança',
+                          investment: 'Investimentos',
+                          wallet: 'Dinheiro'
+                        };
+                        return (
+                          <div
+                            key={acc.id}
+                            className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 flex items-center justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-all"
+                          >
+                            <div className="flex items-center gap-2.5 truncate">
+                              <span className="w-3.5 h-3.5 rounded-full flex-shrink-0" style={{ backgroundColor: acc.color }} />
+                              <div className="truncate">
+                                <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white truncate">{acc.name}</h4>
+                                <span className="text-[10px] text-slate-400">{typeLabels[acc.type] || acc.type}</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <span className={`text-xs sm:text-sm font-bold ${acc.balance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                {formatBRL(acc.balance)}
                               </span>
-                            </div>
-
-                            <div className="flex items-baseline justify-between mb-1.5">
-                              <span className="text-xs text-slate-500">Fatura Atual:</span>
-                              <span className="text-base font-bold text-slate-900 dark:text-white">{formatBRL(usedLimit)}</span>
-                            </div>
-
-                            {/* Limit progress bar */}
-                            <div className="w-full bg-slate-200 dark:bg-slate-700 h-2 rounded-full overflow-hidden mb-2">
-                              <div
-                                className="h-full rounded-full transition-all"
-                                style={{
-                                  width: `${limitPercent}%`,
-                                  backgroundColor: limitPercent > 85 ? '#ef4444' : card.color
+                              <button
+                                onClick={() => {
+                                  setEditingAccount(acc);
+                                  setShowAccountModal(true);
                                 }}
-                              />
-                            </div>
-
-                            <div className="flex items-center justify-between text-[11px] text-slate-400">
-                              <span>Disponível: {formatBRL(availableLimit)}</span>
-                              <span>Limite: {formatBRL(card.limit)}</span>
+                                className="p-1 rounded text-slate-400 hover:text-slate-600 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                                title="Editar Conta"
+                              >
+                                <Icon name="edit" size={13} />
+                              </button>
+                              <button
+                                onClick={() => promptDeleteAccount(acc)}
+                                className="p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                                title="Excluir Conta (Confirmação necessária)"
+                              >
+                                <Icon name="trash" size={13} />
+                              </button>
                             </div>
                           </div>
                         );
@@ -2784,10 +3251,11 @@
                         </button>
 
                         <button
-                          onClick={handleBatchDelete}
-                          className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg transition-all"
+                          onClick={promptBatchDelete}
+                          className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold rounded-lg transition-all flex items-center gap-1"
                         >
-                          Excluir
+                          <Icon name="trash" size={13} />
+                          <span>Excluir Selecionados</span>
                         </button>
                       </div>
                     </div>
@@ -2924,9 +3392,9 @@
                                         <Icon name="edit" size={15} />
                                       </button>
                                       <button
-                                        onClick={() => handleDeleteTransaction(tx.id)}
+                                        onClick={() => promptDeleteTransaction(tx)}
                                         className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40"
-                                        title="Excluir"
+                                        title="Excluir Lançamento"
                                       >
                                         <Icon name="trash" size={15} />
                                       </button>
@@ -3019,8 +3487,9 @@
                                   </button>
 
                                   <button
-                                    onClick={() => handleDeleteTransaction(tx.id)}
+                                    onClick={() => promptDeleteTransaction(tx)}
                                     className="p-1 text-slate-400 hover:text-rose-600"
+                                    title="Excluir Lançamento"
                                   >
                                     <Icon name="trash" size={15} />
                                   </button>
@@ -3160,6 +3629,14 @@
                               >
                                 <Icon name="edit" size={16} />
                               </button>
+
+                              <button
+                                onClick={() => promptDeleteCard(card)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                                title="Excluir Cartão"
+                              >
+                                <Icon name="trash" size={16} />
+                              </button>
                             </div>
                           </div>
 
@@ -3281,59 +3758,159 @@
                 </div>
               )}
 
-              {/* === TAB 5: ACCOUNTS & CATEGORIES === */}
+              {/* === TAB 5: ACCOUNTS & CATEGORIES (FULL CRUD) === */}
               {activeTab === 'categories' && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   
                   {/* Bank Accounts Section */}
-                  <div className="bg-white dark:bg-[#111827] p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 shadow-sm">
-                    <div className="flex items-center justify-between mb-4">
+                  <div className="bg-white dark:bg-[#111827] p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 shadow-sm space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
                       <div>
-                        <h2 className="text-base font-bold text-slate-900 dark:text-white">Contas Bancárias & Carteiras</h2>
-                        <p className="text-xs text-slate-400">Controle de saldos e contas vinculadas</p>
+                        <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                          <span>Contas Bancárias & Carteiras</span>
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                            {accounts.length}
+                          </span>
+                        </h2>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          Saldo total consolidado: <strong className="text-emerald-600 dark:text-emerald-400">{formatBRL(totalBalance)}</strong>
+                        </p>
                       </div>
+
+                      <button
+                        onClick={() => {
+                          setEditingAccount(null);
+                          setShowAccountModal(true);
+                        }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/20 transition-all self-start sm:self-auto"
+                      >
+                        <Icon name="plus" size={16} />
+                        <span>Nova Conta</span>
+                      </button>
                     </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                      {accounts.map(acc => (
-                        <div
-                          key={acc.id}
-                          className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 flex items-center justify-between"
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="w-4 h-4 rounded-full" style={{ backgroundColor: acc.color }} />
-                            <div>
-                              <h4 className="font-semibold text-sm text-slate-900 dark:text-white">{acc.name}</h4>
-                              <span className="text-xs text-slate-400 capitalize">{acc.type}</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {accounts.map(acc => {
+                        const typeNames = {
+                          checking: 'Conta Corrente',
+                          savings: 'Poupança',
+                          investment: 'Investimentos',
+                          wallet: 'Carteira Dinheiro'
+                        };
+                        return (
+                          <div
+                            key={acc.id}
+                            className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/30 flex flex-col justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-all"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-3">
+                                <span className="w-4 h-4 rounded-full flex-shrink-0 shadow-sm" style={{ backgroundColor: acc.color }} />
+                                <div>
+                                  <h4 className="font-bold text-sm text-slate-900 dark:text-white leading-tight">{acc.name}</h4>
+                                  <span className="text-[11px] text-slate-400 capitalize">
+                                    {typeNames[acc.type] || acc.type}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => {
+                                    setEditingAccount(acc);
+                                    setShowAccountModal(true);
+                                  }}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors"
+                                  title="Editar Conta"
+                                >
+                                  <Icon name="edit" size={15} />
+                                </button>
+                                <button
+                                  onClick={() => promptDeleteAccount(acc)}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                                  title="Excluir Conta"
+                                >
+                                  <Icon name="trash" size={15} />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="pt-2 border-t border-slate-200/50 dark:border-slate-800/80 flex items-center justify-between">
+                              <span className="text-xs text-slate-400 font-medium">Saldo Atual</span>
+                              <span className={`font-black text-base ${acc.balance >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'}`}>
+                                {formatBRL(acc.balance)}
+                              </span>
                             </div>
                           </div>
-                          <span className="font-bold text-sm text-emerald-600 dark:text-emerald-400">
-                            {formatBRL(acc.balance)}
-                          </span>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
 
                   {/* Categories Section */}
-                  <div className="bg-white dark:bg-[#111827] p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 shadow-sm">
-                    <div className="flex items-center justify-between mb-4">
+                  <div className="bg-white dark:bg-[#111827] p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 shadow-sm space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-800">
                       <div>
-                        <h2 className="text-base font-bold text-slate-900 dark:text-white">Categorias Financeiras</h2>
-                        <p className="text-xs text-slate-400">Organize suas despesas e receitas</p>
+                        <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                          <span>Categorias Financeiras</span>
+                          <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                            {categories.length}
+                          </span>
+                        </h2>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          Personalize cores, rótulos e tipos para suas receitas e despesas
+                        </p>
                       </div>
+
+                      <button
+                        onClick={() => {
+                          setEditingCategory(null);
+                          setShowCategoryModal(true);
+                        }}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/20 transition-all self-start sm:self-auto"
+                      >
+                        <Icon name="plus" size={16} />
+                        <span>Nova Categoria</span>
+                      </button>
                     </div>
 
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                       {categories.map(cat => (
                         <div
                           key={cat.id}
-                          className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center gap-2.5"
+                          className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-2.5 hover:border-slate-300 dark:hover:border-slate-700 transition-all bg-white dark:bg-slate-900/60"
                         >
-                          <span className="w-3.5 h-3.5 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
-                          <div className="truncate">
-                            <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block truncate">{cat.name}</span>
-                            <span className="text-[10px] text-slate-400 uppercase">{cat.type === 'income' ? 'Receita' : 'Despesa'}</span>
+                          <div className="flex items-center gap-2.5 truncate">
+                            <span className="w-3.5 h-3.5 rounded-full flex-shrink-0 shadow-sm" style={{ backgroundColor: cat.color }} />
+                            <div className="truncate">
+                              <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block truncate leading-tight">
+                                {cat.name}
+                              </span>
+                              <span className={`text-[10px] font-bold uppercase tracking-wider ${
+                                cat.type === 'income' ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-500 dark:text-rose-400'
+                              }`}>
+                                {cat.type === 'income' ? 'Receita' : 'Despesa'}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-0.5 flex-shrink-0">
+                            <button
+                              onClick={() => {
+                                setEditingCategory(cat);
+                                setShowCategoryModal(true);
+                              }}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                              title="Editar Categoria"
+                            >
+                              <Icon name="edit" size={14} />
+                            </button>
+                            <button
+                              onClick={() => promptDeleteCategory(cat)}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors"
+                              title="Excluir Categoria"
+                            >
+                              <Icon name="trash" size={14} />
+                            </button>
                           </div>
                         </div>
                       ))}
@@ -3347,23 +3924,25 @@
               {activeTab === 'settings' && (
                 <div className="space-y-6 max-w-4xl mx-auto">
                   
-                  {/* Cloud Database (Firebase Firestore) Card */}
+                  {/* Individual Account & Real-time Cloud Synchronization Card */}
                   <div className="bg-white dark:bg-[#111827] p-5 rounded-2xl border border-slate-200/80 dark:border-slate-800/80 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                    <div className="space-y-1">
+                    <div className="space-y-1.5">
                       <div className="flex items-center gap-2.5">
-                        <div className="w-9 h-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-                          <Icon name="database" size={20} />
+                        <div className="w-9 h-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center font-bold">
+                          {currentUser && currentUser.email ? currentUser.email.charAt(0).toUpperCase() : <Icon name="user" size={20} />}
                         </div>
                         <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="text-base font-bold text-slate-900 dark:text-white">Banco de Dados em Nuvem (Firestore)</h3>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                              {currentUser && currentUser.email ? currentUser.email : 'Conta Individual (Sessão Privada)'}
+                            </h3>
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 flex items-center gap-1">
                               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                              Ativo
+                              Sincronização em Tempo Real
                             </span>
                           </div>
                           <p className="text-xs text-slate-400 mt-0.5">
-                            Persistência automática no Google Cloud Firestore. Seus lançamentos, cartões e contas ficam sincronizados e salvos com segurança.
+                            Dados protegidos e isolados por usuário no Google Cloud Firestore. Cada conta possui lançamentos, contas e cartões próprios sincronizados automaticamente.
                           </p>
                         </div>
                       </div>
@@ -3380,8 +3959,8 @@
                         onClick={() => setShowCloudModal(true)}
                         className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md transition-all flex items-center justify-center gap-1.5 whitespace-nowrap"
                       >
-                        <Icon name="database" size={14} />
-                        <span>Gerenciar Banco</span>
+                        <Icon name="user" size={14} />
+                        <span>Gerenciar Conta</span>
                       </button>
                     </div>
                   </div>
@@ -3577,6 +4156,15 @@
               onMonthChange={setInvoiceViewingMonth}
               onOpenPayModal={() => setShowPayInvoiceModal(true)}
               onOpenAdjustModal={() => setShowAdjustInvoiceModal(true)}
+              onEditCard={(c) => {
+                setShowInvoiceModal(false);
+                setEditingCard(c);
+                setShowCardModal(true);
+              }}
+              onDeleteCard={(c) => {
+                setShowInvoiceModal(false);
+                promptDeleteCard(c);
+              }}
               categories={categories}
             />
           )}
@@ -3696,6 +4284,44 @@
             />
           )}
 
+          {/* 10. MODAL: CRIAR / EDITAR CONTA BANCÁRIA */}
+          {showAccountModal && (
+            <AccountModal
+              isOpen={showAccountModal}
+              onClose={() => {
+                setShowAccountModal(false);
+                setEditingAccount(null);
+              }}
+              onSave={handleSaveAccount}
+              editingAccount={editingAccount}
+            />
+          )}
+
+          {/* 11. MODAL: CRIAR / EDITAR CATEGORIA FINANCEIRA */}
+          {showCategoryModal && (
+            <CategoryModal
+              isOpen={showCategoryModal}
+              onClose={() => {
+                setShowCategoryModal(false);
+                setEditingCategory(null);
+              }}
+              onSave={handleSaveCategory}
+              editingCategory={editingCategory}
+            />
+          )}
+
+          {/* 12. MODAL: CONFIRMAÇÃO DE EXCLUSÃO (PERGUNTAR ANTES DE EXCLUIR) */}
+          {deleteConfirm.isOpen && (
+            <ConfirmDeleteModal
+              isOpen={deleteConfirm.isOpen}
+              onClose={closeDeleteConfirm}
+              onConfirm={deleteConfirm.onConfirm}
+              title={deleteConfirm.title}
+              message={deleteConfirm.message}
+              details={deleteConfirm.details}
+            />
+          )}
+
         </div>
       );
     }
@@ -3719,17 +4345,56 @@
       const [isRecurring, setIsRecurring] = useState(editingTx ? editingTx.isRecurring : false);
       const [recurrenceFrequency, setRecurrenceFrequency] = useState(editingTx ? editingTx.recurrenceFrequency || 'monthly' : 'monthly');
       const [notes, setNotes] = useState(editingTx ? editingTx.notes || '' : '');
+      const [validationError, setValidationError] = useState(null);
+
+      useEffect(() => {
+        if (editingTx) {
+          setType(editingTx.type || 'expense');
+          setDescription(editingTx.description || '');
+          setAmount(editingTx.amount || '');
+          setDate(editingTx.date || getTodayString());
+          setCategoryId(editingTx.categoryId || (categories[0] ? categories[0].id : ''));
+          setPaymentMethod(editingTx.paymentMethod || 'account');
+          setAccountId(editingTx.accountId || (accounts[0] ? accounts[0].id : ''));
+          setCreditCardId(editingTx.creditCardId || (cards[0] ? cards[0].id : ''));
+          setIsInstallment(Boolean(editingTx.isInstallment));
+          setInstallmentTotal(editingTx.installmentTotal || 3);
+          setIsRecurring(Boolean(editingTx.isRecurring));
+          setRecurrenceFrequency(editingTx.recurrenceFrequency || 'monthly');
+          setNotes(editingTx.notes || '');
+        } else {
+          setType('expense');
+          setDescription('');
+          setAmount('');
+          setDate(getTodayString());
+          setCategoryId(categories[0] ? categories[0].id : '');
+          setPaymentMethod('account');
+          setAccountId(accounts[0] ? accounts[0].id : '');
+          setCreditCardId(cards[0] ? cards[0].id : '');
+          setIsInstallment(false);
+          setInstallmentTotal(3);
+          setIsRecurring(false);
+          setRecurrenceFrequency('monthly');
+          setNotes('');
+        }
+        setValidationError(null);
+      }, [editingTx, isOpen]);
 
       const handleSubmit = (e) => {
         e.preventDefault();
-        if (!description.trim() || !amount || parseFloat(amount) <= 0) {
-          alert('Por favor, informe a descrição e um valor válido.');
+        setValidationError(null);
+        if (!description.trim()) {
+          setValidationError('Por favor, informe a descrição do lançamento.');
+          return;
+        }
+        if (!amount || parseFloat(amount) <= 0) {
+          setValidationError('Por favor, informe um valor maior que zero.');
           return;
         }
 
         onSave({
           type,
-          description,
+          description: description.trim(),
           amount: parseFloat(amount),
           date,
           categoryId,
@@ -3756,6 +4421,13 @@
                 <Icon name="x" size={18} />
               </button>
             </div>
+
+            {validationError && (
+              <div className="mt-3 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs border border-rose-200 dark:border-rose-900/40 flex items-center gap-2">
+                <Icon name="alertTriangle" size={16} />
+                <span>{validationError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4 pt-4 text-xs sm:text-sm">
               {/* Type Switcher */}
@@ -3949,7 +4621,7 @@
     }
 
     // --- Modal: Detalhamento da Fatura do Cartão ---
-    function InvoiceDetailModal({ isOpen, onClose, invoiceData, viewingMonth, onMonthChange, onOpenPayModal, onOpenAdjustModal, categories }) {
+    function InvoiceDetailModal({ isOpen, onClose, invoiceData, viewingMonth, onMonthChange, onOpenPayModal, onOpenAdjustModal, onEditCard, onDeleteCard, categories }) {
       const { card, originalTotal, finalTotal, items, isPaid, adjustment } = invoiceData;
 
       const handlePrevMonth = () => {
@@ -3974,7 +4646,7 @@
                 <span className="w-4 h-4 rounded-full" style={{ backgroundColor: card.color }} />
                 <div>
                   <h3 className="text-base font-bold text-slate-900 dark:text-white">{card.name}</h3>
-                  <span className="text-xs text-slate-400">Vence todo dia {card.dueDay}</span>
+                  <span className="text-xs text-slate-400">Vence todo dia {card.dueDay} · Limite: {formatBRL(card.limit)}</span>
                 </div>
               </div>
 
@@ -3988,6 +4660,26 @@
                     <Icon name="chevronRight" size={14} />
                   </button>
                 </div>
+
+                {onEditCard && (
+                  <button
+                    onClick={() => onEditCard(card)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    title="Editar Cartão"
+                  >
+                    <Icon name="edit" size={15} />
+                  </button>
+                )}
+
+                {onDeleteCard && (
+                  <button
+                    onClick={() => onDeleteCard(card)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                    title="Excluir Cartão"
+                  >
+                    <Icon name="trash" size={15} />
+                  </button>
+                )}
 
                 <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600">
                   <Icon name="x" size={18} />
@@ -4219,13 +4911,44 @@
       const [dueDay, setDueDay] = useState(editingCard ? editingCard.dueDay : 5);
       const [color, setColor] = useState(editingCard ? editingCard.color : '#820ad1');
       const [linkedAccountId, setLinkedAccountId] = useState(editingCard ? editingCard.linkedAccountId : (accounts[0] ? accounts[0].id : ''));
+      const [cardError, setCardError] = useState(null);
+
+      useEffect(() => {
+        if (editingCard) {
+          setName(editingCard.name || '');
+          setBrand(editingCard.brand || 'Mastercard');
+          setLimit(editingCard.limit || 5000);
+          setClosingDay(editingCard.closingDay || 25);
+          setDueDay(editingCard.dueDay || 5);
+          setColor(editingCard.color || '#820ad1');
+          setLinkedAccountId(editingCard.linkedAccountId || (accounts[0] ? accounts[0].id : ''));
+        } else {
+          setName('');
+          setBrand('Mastercard');
+          setLimit(5000);
+          setClosingDay(25);
+          setDueDay(5);
+          setColor('#820ad1');
+          setLinkedAccountId(accounts[0] ? accounts[0].id : '');
+        }
+        setCardError(null);
+      }, [editingCard, isOpen]);
 
       const colorPresets = ['#820ad1', '#ff7a00', '#004990', '#10b981', '#ef4444', '#1e293b', '#d97706', '#ec4899'];
 
       const handleSubmit = (e) => {
         e.preventDefault();
+        setCardError(null);
+        if (!name.trim()) {
+          setCardError('Por favor, informe o nome do cartão.');
+          return;
+        }
+        if (!limit || parseFloat(limit) <= 0) {
+          setCardError('Por favor, informe um limite válido.');
+          return;
+        }
         onSave({
-          name,
+          name: name.trim(),
           brand,
           limit: parseFloat(limit),
           closingDay: parseInt(closingDay, 10),
@@ -4241,6 +4964,13 @@
             <h3 className="text-base font-bold text-slate-900 dark:text-white mb-4">
               {editingCard ? 'Editar Cartão' : 'Novo Cartão de Crédito'}
             </h3>
+
+            {cardError && (
+              <div className="mb-4 p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs border border-rose-200 dark:border-rose-900/40 flex items-center gap-2">
+                <Icon name="alertTriangle" size={16} />
+                <span>{cardError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4 text-xs sm:text-sm">
               <div className="space-y-1">
@@ -4767,7 +5497,7 @@
       );
     }
 
-    // 9. MODAL: BANCO DE DADOS & NUVEM (FIREBASE FIRESTORE)
+    // 9. MODAL: CONTA INDIVIDUAL & SINCRONIZAÇÃO EM TEMPO REAL (FIREBASE FIRESTORE)
     function CloudDatabaseModal({
       isOpen,
       onClose,
@@ -4793,6 +5523,7 @@
       totalCategories
     }) {
       const [copiedUid, setCopiedUid] = useState(false);
+      const [showSwitchAccountForm, setShowSwitchAccountForm] = useState(false);
 
       if (!isOpen) return null;
 
@@ -4809,6 +5540,8 @@
         return new Date(d).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' (' + new Date(d).toLocaleDateString('pt-BR') + ')';
       };
 
+      const isRegisteredAccount = currentUser && !currentUser.isAnonymous;
+
       return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
           <div className="bg-white dark:bg-[#111827] rounded-3xl p-5 sm:p-6 max-w-xl w-full shadow-2xl space-y-5 border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
@@ -4816,17 +5549,17 @@
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-                  <Icon name="database" size={22} />
+                <div className="w-10 h-10 rounded-2xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center font-bold text-sm shadow-sm">
+                  {currentUser && currentUser.email ? currentUser.email.charAt(0).toUpperCase() : <Icon name="user" size={22} />}
                 </div>
                 <div>
                   <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                    <span>Banco de Dados & Nuvem</span>
+                    <span>Conta Individual & Nuvem</span>
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
-                      Firestore Ativo
+                      Tempo Real Ativo
                     </span>
                   </h3>
-                  <p className="text-xs text-slate-400">Google Cloud Firestore + Sincronização em Tempo Real</p>
+                  <p className="text-xs text-slate-400">Google Cloud Firestore · Dados Exclusivos e Isolados</p>
                 </div>
               </div>
               <button
@@ -4837,25 +5570,30 @@
               </button>
             </div>
 
-            {/* Live Status Card */}
+            {/* Live Real-time Status Banner */}
             <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="relative flex h-2.5 w-2.5">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2.5">
+                  <span className="relative flex h-3 w-3">
                     {syncStatus === 'synced' && (
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     )}
-                    <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                    <span className={`relative inline-flex rounded-full h-3 w-3 ${
                       syncStatus === 'synced' ? 'bg-emerald-500' : syncStatus === 'syncing' ? 'bg-blue-500' : 'bg-amber-500'
                     }`}></span>
                   </span>
-                  <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
-                    {syncStatus === 'synced'
-                      ? 'Nuvem Conectada e Sincronizada'
-                      : syncStatus === 'syncing'
-                      ? 'Sincronizando com o Banco...'
-                      : 'Modo Offline (Dados Seguros no Aparelho)'}
-                  </span>
+                  <div>
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-200 block">
+                      {syncStatus === 'synced'
+                        ? 'Sincronização em Tempo Real Conectada'
+                        : syncStatus === 'syncing'
+                        ? 'Sincronizando com o Banco...'
+                        : 'Modo Offline (Dados Locais Seguros)'}
+                    </span>
+                    <span className="text-[11px] text-slate-400">
+                      Alterações no celular ou computador refletem instantaneamente
+                    </span>
+                  </div>
                 </div>
                 <button
                   onClick={onForceSync}
@@ -4868,21 +5606,26 @@
 
               <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-800/80 text-xs">
                 <div>
-                  <span className="text-slate-400 block text-[11px]">Projeto Firebase:</span>
+                  <span className="text-slate-400 block text-[11px]">Banco Firestore:</span>
                   <span className="font-mono font-semibold text-slate-700 dark:text-slate-300">gen-lang-client-0900185518</span>
                 </div>
                 <div>
-                  <span className="text-slate-400 block text-[11px]">Última Sincronização:</span>
+                  <span className="text-slate-400 block text-[11px]">Último Evento:</span>
                   <span className="font-semibold text-slate-700 dark:text-slate-300">{formatSyncDate(lastSyncTime)}</span>
                 </div>
               </div>
             </div>
 
-            {/* Database Collections Records Count */}
+            {/* Database Collections Records Count for this Individual Account */}
             <div>
-              <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-2">
-                Documentos Salvos na Nuvem
-              </span>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block">
+                  Documentos Desta Conta Individual
+                </span>
+                <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-semibold">
+                  Armazenamento Isolado
+                </span>
+              </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <div className="p-3 rounded-xl bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/40 text-center">
                   <span className="text-lg font-extrabold text-emerald-600 dark:text-emerald-400 block">{totalTxs}</span>
@@ -4903,50 +5646,77 @@
               </div>
             </div>
 
-            {/* User Session & Multi-Device Sync Section */}
+            {/* Individual User Account Section */}
             <div className="border border-slate-200 dark:border-slate-800 rounded-2xl p-4 space-y-3 bg-white dark:bg-[#111827]">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Icon name="user" size={16} className="text-emerald-500" />
                   <span className="text-xs font-bold text-slate-900 dark:text-white">
-                    {currentUser && currentUser.isAnonymous ? 'Sessão Individual Segura' : 'Conta Sincronizada'}
+                    {isRegisteredAccount ? 'Conta Individual Registrada' : 'Sessão Individual Privada'}
                   </span>
                 </div>
-                {currentUser && !currentUser.isAnonymous && (
+                {isRegisteredAccount && (
                   <button
                     onClick={onSignOut}
                     className="text-xs text-rose-600 hover:underline font-semibold"
                   >
-                    Sair da Conta
+                    Sair desta Conta
                   </button>
                 )}
               </div>
 
               {currentUser && (
-                <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/80 border border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2">
-                  <div className="truncate">
-                    <span className="text-[10px] text-slate-400 block">UID do Usuário (Chave Privada Firestore):</span>
-                    <span className="font-mono text-xs font-semibold text-slate-700 dark:text-slate-300 truncate block">
-                      {currentUser.uid}
-                    </span>
+                <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/80 border border-slate-100 dark:border-slate-800/80 space-y-1.5">
+                  {currentUser.email && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] text-slate-400">E-mail:</span>
+                      <span className="font-bold text-xs text-slate-900 dark:text-white">{currentUser.email}</span>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-200/50 dark:border-slate-800/50">
+                    <div className="truncate">
+                      <span className="text-[10px] text-slate-400 block">UID Exclusivo (Chave de Isolamento):</span>
+                      <span className="font-mono text-xs font-semibold text-slate-700 dark:text-slate-300 truncate block">
+                        {currentUser.uid}
+                      </span>
+                    </div>
+                    <button
+                      onClick={handleCopyUid}
+                      className="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 font-semibold text-slate-700 dark:text-slate-300 flex-shrink-0"
+                    >
+                      {copiedUid ? 'Copiado!' : 'Copiar'}
+                    </button>
                   </div>
-                  <button
-                    onClick={handleCopyUid}
-                    className="px-2.5 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 font-semibold text-slate-700 dark:text-slate-300 flex-shrink-0"
-                  >
-                    {copiedUid ? 'Copiado!' : 'Copiar'}
-                  </button>
                 </div>
               )}
 
-              {/* If anonymous user: Offer Email Linking for Multi-device */}
-              {currentUser && currentUser.isAnonymous && (
-                <div className="pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-3">
-                  <div className="bg-emerald-50/60 dark:bg-emerald-950/20 p-3 rounded-xl border border-emerald-100 dark:border-emerald-900/40">
-                    <p className="text-xs text-emerald-800 dark:text-emerald-300 leading-relaxed">
-                      💡 <strong>Sincronização entre Celular e Computador:</strong> Crie um e-mail e senha abaixo para acessar os mesmos dados em qualquer outro dispositivo ou navegador.
+              {/* Multi-Device Login / Switch Account Toggle for registered users */}
+              {isRegisteredAccount && (
+                <div className="pt-2 border-t border-slate-100 dark:border-slate-800/80">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-slate-500">
+                      Sincronização em tempo real ativa nesta conta.
                     </p>
+                    <button
+                      onClick={() => setShowSwitchAccountForm(!showSwitchAccountForm)}
+                      className="text-xs text-emerald-600 dark:text-emerald-400 font-bold hover:underline"
+                    >
+                      {showSwitchAccountForm ? 'Ocultar Acesso' : 'Alternar de Conta'}
+                    </button>
                   </div>
+                </div>
+              )}
+
+              {/* Login / Register Form (shown for anonymous user OR when registered user wants to switch) */}
+              {(!isRegisteredAccount || showSwitchAccountForm) && (
+                <div className="pt-2 border-t border-slate-100 dark:border-slate-800/80 space-y-3">
+                  {!isRegisteredAccount && (
+                    <div className="bg-emerald-50/60 dark:bg-emerald-950/20 p-3 rounded-xl border border-emerald-100 dark:border-emerald-900/40">
+                      <p className="text-xs text-emerald-800 dark:text-emerald-300 leading-relaxed">
+                        💡 <strong>Sincronização entre Celular e Computador:</strong> Cadastre seu e-mail e senha abaixo para acessar os mesmos dados e lançamentos da sua conta individual em qualquer aparelho com atualização instantânea.
+                      </p>
+                    </div>
+                  )}
 
                   <div className="flex border-b border-slate-200 dark:border-slate-700 mb-2">
                     <button
@@ -4955,7 +5725,7 @@
                         cloudAuthMode === 'register' ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400' : 'border-transparent text-slate-400'
                       }`}
                     >
-                      Criar Acesso por E-mail
+                      Criar Conta Individual
                     </button>
                     <button
                       onClick={() => { setCloudAuthMode('login'); }}
@@ -5001,7 +5771,7 @@
                       className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold shadow-md transition-all flex items-center justify-center gap-2"
                     >
                       <Icon name="cloud" size={15} />
-                      <span>{cloudAuthLoading ? 'Processando...' : cloudAuthMode === 'register' ? 'Vincular Conta na Nuvem' : 'Entrar com Minha Conta'}</span>
+                      <span>{cloudAuthLoading ? 'Processando...' : cloudAuthMode === 'register' ? 'Criar e Vincular Conta' : 'Entrar com Minha Conta'}</span>
                     </button>
                   </form>
                 </div>
@@ -5019,6 +5789,358 @@
               </button>
             </div>
 
+          </div>
+        </div>
+      );
+    }
+
+    // 10. MODAL: CONFIRMAÇÃO DE EXCLUSÃO ("Perguntar antes de excluir")
+    function ConfirmDeleteModal({ isOpen, onClose, onConfirm, title, message, details }) {
+      if (!isOpen) return null;
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-[#111827] rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-start gap-3.5">
+              <div className="w-12 h-12 rounded-2xl bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 flex items-center justify-center flex-shrink-0">
+                <Icon name="alertTriangle" size={24} />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-base font-bold text-slate-900 dark:text-white leading-tight">
+                  {title || 'Confirmar Exclusão'}
+                </h3>
+                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 mt-1.5 leading-relaxed">
+                  {message}
+                </p>
+                {details && (
+                  <p className="text-xs text-rose-600 dark:text-rose-400 mt-2.5 p-2.5 rounded-xl bg-rose-50/60 dark:bg-rose-950/40 border border-rose-200/60 dark:border-rose-900/40">
+                    {details}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2.5 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={onConfirm}
+                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold shadow-md shadow-rose-600/25 flex items-center gap-1.5 transition-all"
+              >
+                <Icon name="trash" size={15} />
+                <span>Sim, Excluir</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // 11. MODAL: CRIAR / EDITAR CONTA BANCÁRIA OU CARTEIRA
+    function AccountModal({ isOpen, onClose, onSave, editingAccount }) {
+      const [name, setName] = useState(editingAccount ? editingAccount.name : '');
+      const [type, setType] = useState(editingAccount ? editingAccount.type : 'checking');
+      const [balance, setBalance] = useState(editingAccount ? editingAccount.balance : '');
+      const [color, setColor] = useState(editingAccount ? editingAccount.color : '#10b981');
+      const [accountError, setAccountError] = useState(null);
+
+      useEffect(() => {
+        if (editingAccount) {
+          setName(editingAccount.name || '');
+          setType(editingAccount.type || 'checking');
+          setBalance(editingAccount.balance !== undefined ? editingAccount.balance : '');
+          setColor(editingAccount.color || '#10b981');
+        } else {
+          setName('');
+          setType('checking');
+          setBalance('0');
+          setColor('#10b981');
+        }
+        setAccountError(null);
+      }, [editingAccount, isOpen]);
+
+      const colorPresets = ['#10b981', '#820ad1', '#ff7a00', '#004990', '#06b6d4', '#ef4444', '#ec4899', '#6366f1'];
+
+      if (!isOpen) return null;
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        setAccountError(null);
+        if (!name.trim()) {
+          setAccountError('Por favor, informe o nome da conta ou instituição.');
+          return;
+        }
+        onSave({
+          name: name.trim(),
+          type,
+          balance: parseFloat(balance || 0),
+          color
+        });
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-[#111827] rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                  <Icon name="wallet" size={18} />
+                </div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {editingAccount ? 'Editar Conta Bancária' : 'Nova Conta ou Carteira'}
+                </h3>
+              </div>
+              <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600">
+                <Icon name="x" size={18} />
+              </button>
+            </div>
+
+            {accountError && (
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs border border-rose-200 dark:border-rose-900/40 flex items-center gap-2">
+                <Icon name="alertTriangle" size={16} />
+                <span>{accountError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-4 text-xs sm:text-sm">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase">Nome da Conta / Banco</label>
+                <input
+                  type="text"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Ex: Nubank, Itaú, Carteira Dinheiro..."
+                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-slate-900 dark:text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-slate-500 uppercase">Tipo de Conta</label>
+                  <select
+                    value={type}
+                    onChange={(e) => setType(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-900 dark:text-white"
+                  >
+                    <option value="checking">Conta Corrente</option>
+                    <option value="savings">Poupança</option>
+                    <option value="investment">Investimentos</option>
+                    <option value="wallet">Carteira (Dinheiro)</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-[11px] font-semibold text-slate-500 uppercase">Saldo (R$)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    value={balance}
+                    onChange={(e) => setBalance(e.target.value)}
+                    placeholder="0,00"
+                    className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-900 dark:text-white font-bold"
+                  />
+                </div>
+              </div>
+
+              {/* Color Picker */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase">Cor de Identificação</label>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {colorPresets.map(preset => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setColor(preset)}
+                      className={`w-7 h-7 rounded-full border-2 transition-transform ${
+                        color === preset ? 'scale-110 border-white shadow-md' : 'border-transparent'
+                      }`}
+                      style={{ backgroundColor: preset }}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={(e) => setColor(e.target.value)}
+                    className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
+                    title="Cor Personalizada"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2.5 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/20"
+                >
+                  {editingAccount ? 'Salvar Alterações' : 'Criar Conta'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // 12. MODAL: CRIAR / EDITAR CATEGORIA FINANCEIRA
+    function CategoryModal({ isOpen, onClose, onSave, editingCategory }) {
+      const [name, setName] = useState(editingCategory ? editingCategory.name : '');
+      const [type, setType] = useState(editingCategory ? editingCategory.type : 'expense');
+      const [color, setColor] = useState(editingCategory ? editingCategory.color : '#10b981');
+      const [categoryError, setCategoryError] = useState(null);
+
+      useEffect(() => {
+        if (editingCategory) {
+          setName(editingCategory.name || '');
+          setType(editingCategory.type || 'expense');
+          setColor(editingCategory.color || '#10b981');
+        } else {
+          setName('');
+          setType('expense');
+          setColor('#10b981');
+        }
+        setCategoryError(null);
+      }, [editingCategory, isOpen]);
+
+      const colorPresets = ['#10b981', '#6366f1', '#f59e0b', '#ec4899', '#ef4444', '#8b5cf6', '#06b6d4', '#64748b', '#3b82f6'];
+
+      if (!isOpen) return null;
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        setCategoryError(null);
+        if (!name.trim()) {
+          setCategoryError('Por favor, informe o nome da categoria.');
+          return;
+        }
+        onSave({
+          name: name.trim(),
+          type,
+          color,
+          icon: 'tag'
+        });
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-[#111827] rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                  <Icon name="tags" size={18} />
+                </div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-white">
+                  {editingCategory ? 'Editar Categoria' : 'Nova Categoria'}
+                </h3>
+              </div>
+              <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600">
+                <Icon name="x" size={18} />
+              </button>
+            </div>
+
+            {categoryError && (
+              <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 text-xs border border-rose-200 dark:border-rose-900/40 flex items-center gap-2">
+                <Icon name="alertTriangle" size={16} />
+                <span>{categoryError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-4 text-xs sm:text-sm">
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase">Nome da Categoria</label>
+                <input
+                  type="text"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Ex: Alimentação, Pet, Saúde, Assinaturas..."
+                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2.5 text-slate-900 dark:text-white"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase">Tipo da Categoria</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setType('expense')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition-all ${
+                      type === 'expense'
+                        ? 'bg-rose-50 dark:bg-rose-950/40 border-rose-500 text-rose-700 dark:text-rose-300'
+                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    Despesa
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setType('income')}
+                    className={`py-2 px-3 rounded-xl border text-xs font-bold transition-all ${
+                      type === 'income'
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-700 dark:text-emerald-300'
+                        : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                    }`}
+                  >
+                    Receita
+                  </button>
+                </div>
+              </div>
+
+              {/* Color Selection */}
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold text-slate-500 uppercase">Cor da Categoria</label>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {colorPresets.map(preset => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setColor(preset)}
+                      className={`w-7 h-7 rounded-full border-2 transition-transform ${
+                        color === preset ? 'scale-110 border-white shadow-md' : 'border-transparent'
+                      }`}
+                      style={{ backgroundColor: preset }}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={(e) => setColor(e.target.value)}
+                    className="w-8 h-8 rounded-lg cursor-pointer bg-transparent border-0"
+                    title="Cor Personalizada"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-4 py-2.5 rounded-xl text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/20"
+                >
+                  {editingCategory ? 'Salvar Alterações' : 'Criar Categoria'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       );
